@@ -1,84 +1,61 @@
-# ==============================================
-# BEASTMODE ALPHA RADAR – Discord Auto Alerts
-# Author: Timwal78 | Version: 1.0 (Stable)
-# ==============================================
-
-import os, time, requests, pandas as pd
+import os
+import time
+import requests
+import pandas as pd
 from discord_webhook import DiscordWebhook
-import schedule
 
-# -------------------------------
-# 🔐 Load environment variables
-# -------------------------------
+# --- ENVIRONMENT VARIABLES ---
 ALPHA_KEY = os.getenv("ALPHA_KEY")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-TICKERS = os.getenv("TICKERS", "AMC,GME,IONQ,SMR,NAK,BNZI,FFIE").split(",")
+TICKERS = os.getenv("TICKERS", "AMC,GME,IONQ,NAK,SMR,FFIE,BNZI").split(",")
 
+# --- CONSTANTS ---
 ALPHA_URL = "https://www.alphavantage.co/query"
+REFRESH_MINUTES = 5 # how often to update (every 5 min)
 
-# -------------------------------
-# ⚙️ Function: get quote
-# -------------------------------
-def get_quote(symbol):
-    params = {
-        "function": "GLOBAL_QUOTE",
-        "symbol": symbol.strip(),
-        "apikey": ALPHA_KEY
-    }
-    r = requests.get(ALPHA_URL, params=params)
-    data = r.json().get("Global Quote", {})
-    if not data:
-        return None
-    return {
-        "symbol": data.get("01. symbol"),
-        "price": float(data.get("05. price", 0.0)),
-        "change": float(data.get("09. change", 0.0)),
-        "percent": data.get("10. change percent", "0%")
-    }
-
-# -------------------------------
-# 💬 Function: post to Discord
-# -------------------------------
-def send_to_discord(msg):
+# --- DISCORD ALERT FUNCTION ---
+def send_discord(message):
     try:
-        webhook = DiscordWebhook(url=DISCORD_WEBHOOK, content=msg)
-        webhook.execute()
+        webhook = DiscordWebhook(url=DISCORD_WEBHOOK, content=message)
+        response = webhook.execute()
+        if response.status_code in (200, 204):
+            print(f"✅ Sent to Discord: {message}")
+        else:
+            print(f"⚠️ Discord error {response.status_code}: {response.text}")
     except Exception as e:
-        print(f"[Error] Discord send failed: {e}")
+        print(f"❌ Discord send failed: {e}")
 
-# -------------------------------
-# 🧠 Function: scan all tickers
-# -------------------------------
-def scan_tickers():
-    print("🔄 Running Alpha scan...")
-    results = []
-    for t in TICKERS:
-        quote = get_quote(t)
-        if not quote:
-            continue
-        change = quote["change"]
-        pct = float(quote["percent"].replace("%",""))
-        if abs(pct) >= 5: # simple squeeze momentum threshold
-            direction = "🚀 Bullish" if change > 0 else "💀 Bearish"
-            msg = (f"**{direction} Alert:** `{t}`\n"
-                   f"Price: ${quote['price']:.2f}\n"
-                   f"Change: {pct:.2f}%")
-            send_to_discord(msg)
-            results.append(t)
-    if results:
-        print(f"✅ Alerts sent for: {', '.join(results)}")
-    else:
-        print("⚪ No strong movers yet.")
+# --- FETCH STOCK QUOTE FUNCTION ---
+def get_quote(symbol):
+    try:
+        params = {
+            "function": "GLOBAL_QUOTE",
+            "symbol": symbol.strip(),
+            "apikey": ALPHA_KEY
+        }
+        r = requests.get(ALPHA_URL, params=params)
+        data = r.json()
+        price = float(data["Global Quote"]["05. price"])
+        change_percent = float(data["Global Quote"]["10. change percent"].replace("%",""))
+        return price, change_percent
+    except Exception as e:
+        print(f"⚠️ Error fetching {symbol}: {e}")
+        return None, None
 
-# -------------------------------
-# ⏰ Schedule every 5 minutes
-# -------------------------------
-schedule.every(5).minutes.do(scan_tickers)
+# --- STARTUP ---
+send_discord("🚀 **Beastmode Alpha Bot is ONLINE!** Tracking tickers now...")
 
-# -------------------------------
-# 🌀 Run forever
-# -------------------------------
-print("🔥 Beastmode Alpha Radar running...")
+# --- MAIN LOOP ---
 while True:
-    schedule.run_pending()
-    time.sleep(30)
+    for symbol in TICKERS:
+        price, change_percent = get_quote(symbol)
+        if price is not None:
+            msg = f"📈 {symbol}: ${price:.2f} ({change_percent:.2f}%)"
+            print(msg)
+
+            # Simple squeeze condition (change > 10%)
+            if change_percent >= 10:
+                alert = f"🔥 **SQUEEZE ALERT!** {symbol} is up {change_percent:.2f}% at ${price:.2f}"
+                send_discord(alert)
+
+    time.sleep(REFRESH_MINUTES * 60)
