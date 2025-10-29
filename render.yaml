@@ -6,16 +6,17 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: |
+    startCommand: >
       python -m http.server 10000 & python bot.py &
-      while true; do
-        curl -s "https://beastmode-alpha-bot.onrender.com" > /dev/null
-        sleep 600
-      done
+      while true; do curl -sS "https://beastmode-alpha-bot.onrender.com" >/dev/null || true; sleep 540; done
     envVars:
-      - key: ALPHA_KEY
-        value: your_alpha_vantage_api_key_here
+      - key: ALPHA_KEYS
+        value: your_alpha_vantage_key1, your_alpha_vantage_key2
       - key: DISCORD_WEBHOOK
-        value: https://discord.com/api/webhooks/1425603461826875435/aQBVUMfvza2qjuMaOJhSS3zTuC7mwJsreTlr_TfkUlQLzHt2gmc_noGlGadRUvrqJjGm
+        value: https://discord.com/api/webhooks/XXXXXXXX/XXXXXXXX
       - key: TICKERS
-        value: AMC,GME,IONQ,NAK,SMR,FFIE,BNZI
+        value: AMC,GME,IONQ,NAK,SMR,FFIE,BNZI,AREB,BNBX
+      - key: SCAN_INTERVAL_SEC
+        value: 15
+      - key: HEARTBEAT_MIN
+        value: 60
