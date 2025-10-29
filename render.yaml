@@ -10,8 +10,8 @@ services:
       python -m http.server 10000 & python bot.py &
       while true; do curl -sS "https://beastmode-alpha-bot.onrender.com" >/dev/null || true; sleep 540; done
     envVars:
-      - key: ALPHA_KEYS
-        value: your_alpha_vantage_key1, your_alpha_vantage_key2
+      - key: ALPHA_KEY
+        value: your_alpha_vantage_key
       - key: DISCORD_WEBHOOK
         value: https://discord.com/api/webhooks/XXXXXXXX/XXXXXXXX
       - key: TICKERS
