@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: beastmode-alpha-bot
+    env: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: ALPHA_KEY
+        value: your_alpha_vantage_api_key_here
+      - key: DISCORD_WEBHOOK
+        value: https://discord.com/api/webhooks/XXXXXXXXXXXX
+      - key: TICKERS
+        value: AMC,GME,IONQ,SMR,NAK,BNZI,FFIE
