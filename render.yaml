@@ -1,12 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: beastmode-alpha-bot
     env: python
     plan: free
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: python bot.py --port 10000
     envVars:
       - key: ALPHA_KEY
         value: your_alpha_vantage_api_key_here
