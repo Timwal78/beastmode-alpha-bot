@@ -21,3 +21,9 @@ services:
         sync: false
       - key: REDIRECT_URI
         sync: false
+      - key: SCHWAB_ACCOUNT_ID
+        sync: false
+      - key: TRADE_MODE
+        sync: false
+      - key: UNIVERSE
+        sync: false
