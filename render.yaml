@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: beastmode-alpha-bot
+    name: beastmode-trading-bot
     env: python
     plan: free
     buildCommand: |
