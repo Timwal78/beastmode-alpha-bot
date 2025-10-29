@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: beastmode-alpha-bot
     env: python
     plan: free
