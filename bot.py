@@ -1,239 +1,300 @@
-import os, time, math, json, random, threading, http.server, socketserver
-from datetime import datetime, timezone
-from collections import deque
-
+import os, time, math, json, threading, datetime as dt
+from datetime import timezone, timedelta
 import requests
-import numpy as np
 import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
+from flask import Flask
 
 # ─────────────────────────────────────────────────────────────
-# Env & Settings
+# Boot & ENV
 # ─────────────────────────────────────────────────────────────
-# ALPHA_KEYS supports one or many keys (comma separated). Fallback to ALPHA_KEY.
-_keys_raw = os.getenv("ALPHA_KEYS") or os.getenv("ALPHA_KEY") or ""
-API_KEYS = [k.strip() for k in _keys_raw.split(",") if k.strip()]
-if not API_KEYS:
-    raise SystemExit("Missing ALPHA_KEY(S). Set ALPHA_KEY or ALPHA_KEYS in Render > Environment.")
+load_dotenv(override=True)
 
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "").strip()
-if not DISCORD_WEBHOOK:
-    raise SystemExit("Missing DISCORD_WEBHOOK env var.")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+ALPHA_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+PORT = int(os.getenv("PORT", "10000"))
 
-TICKERS = [t.strip().upper() for t in (os.getenv("TICKERS") or "AMC,GME").split(",") if t.strip()]
+# Schwab creds (for phase 3 live trading – placeholders here)
+SCHWAB_CLIENT_ID = os.getenv("SCHWAB_CLIENT_ID", "").strip()
+SCHWAB_CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET", "").strip()
+REDIRECT_URI = os.getenv("REDIRECT_URI", "").strip()
 
-SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "15")) # per-symbol delay
-HEARTBEAT_MIN = int(os.getenv("HEARTBEAT_MIN", "60")) # heartbeat cadence
+# You can edit this universe in code or load from an env/file later.
+UNIVERSE = [
+    # Squeeze hunting core list (edit freely):
+    "GME","AMC","IONQ","NAK","SMR","FFIE","BNZI",
+    # Add a few liquid options names for pattern confirmations:
+    "SPY","QQQ","TSLA","NVDA","AMD","AAPL","META","MSFT"
+]
 
-# Alpha Vantage limits (free ≈ 5 calls/min). We’ll process ~1 symbol / 12s by default.
-ALPHA_BASE = "https://www.alphavantage.co/query"
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "beastmode-alpha-bot/1.0"})
-
-# ─────────────────────────────────────────────────────────────
-# Utilities
-# ─────────────────────────────────────────────────────────────
-def pick_key() -> str:
-    return random.choice(API_KEYS)
-
-def ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-def post_discord(content=None, embed=None):
-    payload = {}
-    if content:
-        payload["content"] = content
-    if embed:
-        payload["embeds"] = [embed]
-    try:
-        r = SESSION.post(DISCORD_WEBHOOK, json=payload, timeout=15)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[{ts()}] Discord error: {e}")
-
-def pct(a, b):
-    try:
-        return 100.0 * (a - b) / b if b else np.nan
-    except Exception:
-        return np.nan
-
-def bb_stats(close_series, length=20, mult=2.0):
-    if len(close_series) < length:
-        return np.nan, np.nan, np.nan
-    s = pd.Series(close_series)
-    ma = s.rolling(length).mean()
-    sd = s.rolling(length).std(ddof=0)
-    upper = ma + mult * sd
-    lower = ma - mult * sd
-    width = (upper - lower) / ma # relative width
-    return float(ma.iloc[-1]), float(upper.iloc[-1]), float(lower.iloc[-1]), float(width.iloc[-1])
-
-def percent_rank(series, value):
-    arr = np.array(series, dtype=float)
-    arr = arr[~np.isnan(arr)]
-    if len(arr) == 0:
-        return np.nan
-    rank = (arr < value).sum() / len(arr)
-    return float(rank)
+# Scan cadence & thresholds
+SCAN_INTERVAL_SEC = 60 # run loop every minute
+RVOL_LOOKBACK = 20
+RVOL_MIN = 2.0 # relative volume minimum
+BB_LEN = 20
+KC_LEN = 20
+KC_MULT = 1.5
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIG = 9
 
 # ─────────────────────────────────────────────────────────────
-# Alpha Vantage fetchers with backoff
+# Heartbeat server (keeps Render web service happy)
 # ─────────────────────────────────────────────────────────────
-def av_get(params, max_retries=3, backoff=8):
-    params = {**params, "apikey": pick_key()}
-    for i in range(max_retries):
-        try:
-            r = SESSION.get(ALPHA_BASE, params=params, timeout=20)
-            if r.status_code == 200:
-                data = r.json()
-                # API limit note handling
-                if "Note" in data or "Information" in data:
-                    wait = backoff * (i + 1)
-                    print(f"[{ts()}] Alpha note/info: throttled. Sleeping {wait}s")
-                    time.sleep(wait)
-                    continue
-                return data
-            else:
-                print(f"[{ts()}] HTTP {r.status_code} from AlphaVantage; retry {i+1}")
-        except Exception as e:
-            print(f"[{ts()}] av_get error: {e}; retry {i+1}")
-        time.sleep(backoff * (i + 1))
-    return None
+app = Flask(__name__)
 
-def get_daily(symbol, outputsize="compact"):
-    data = av_get({"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": outputsize})
-    if not data or "Time Series (Daily)" not in data:
-        return None
-    tsd = data["Time Series (Daily)"]
-    rows = []
-    for k, v in tsd.items():
-        rows.append({
-            "date": k,
-            "open": float(v["1. open"]),
-            "high": float(v["2. high"]),
-            "low": float(v["3. low"]),
-            "close": float(v["4. close"]),
-            "volume": float(v["5. volume"])
-        })
-    df = pd.DataFrame(rows).sort_values("date")
+@app.route("/")
+def root():
+    return "BeastMode Alpha Bot — live", 200
+
+def run_server():
+    app.run(host="0.0.0.0", port=PORT, debug=False)
+
+# ─────────────────────────────────────────────────────────────
+# Data helpers (Alpha Vantage — free key is rate-limited)
+# ─────────────────────────────────────────────────────────────
+def alpha_intraday(symbol: str, interval="5min", output="compact"):
+    """Return OHLCV DataFrame (most recent first index to oldest)."""
+    url = ("https://www.alphavantage.co/query"
+           f"?function=TIME_SERIES_INTRADAY&symbol={symbol}"
+           f"&interval={interval}&outputsize={output}&apikey={ALPHA_KEY}")
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    key = f"Time Series ({interval})"
+    if key not in js:
+        raise RuntimeError(f"AlphaVantage error for {symbol}: {js}")
+    df = pd.DataFrame(js[key]).T.rename(columns={
+        "1. open":"open","2. high":"high","3. low":"low",
+        "4. close":"close","5. volume":"volume"
+    })
+    df = df.astype(float)
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True) # oldest → newest
     return df
 
+def alpha_quote(symbol: str):
+    """Last trade price for quick option calc."""
+    url = ( "https://www.alphavantage.co/query"
+            f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_KEY}" )
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    js = r.json().get("Global Quote", {})
+    px = float(js.get("05. price", "0") or 0)
+    return px
+
 # ─────────────────────────────────────────────────────────────
-# Signal Logic (Phase 3: RVOL + BB squeeze + Trend filter)
+# Indicators & Signals
 # ─────────────────────────────────────────────────────────────
-def analyze_symbol(sym: str):
-    df = get_daily(sym, outputsize="compact") # last ~100 bars
-    if df is None or len(df) < 40:
+def calc_rvol(vol, lookback=20):
+    # RVOL = today vol / avg vol
+    avg = pd.Series(vol).rolling(lookback).mean()
+    rvol = pd.Series(vol) / avg
+    return rvol
+
+def bollinger(close, length=20, mult=2.0):
+    ma = pd.Series(close).rolling(length).mean()
+    sd = pd.Series(close).rolling(length).std(ddof=0)
+    upper = ma + mult*sd
+    lower = ma - mult*sd
+    return ma, upper, lower
+
+def keltner(high, low, close, length=20, mult=1.5):
+    ema = pd.Series(close).ewm(span=length, adjust=False).mean()
+    tr1 = pd.Series(high) - pd.Series(low)
+    tr2 = (pd.Series(high) - pd.Series(close).shift(1)).abs()
+    tr3 = (pd.Series(low) - pd.Series(close).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=length, adjust=False).mean()
+    upper = ema + mult*atr
+    lower = ema - mult*atr
+    return ema, upper, lower
+
+def is_ttm_squeeze(df):
+    # Classic definition: BB inside KC → squeeze ON; BB breaks out → squeeze OFF trigger
+    ma, bb_u, bb_l = bollinger(df["close"], BB_LEN, 2.0)
+    kc_m, kc_u, kc_l = keltner(df["high"], df["low"], df["close"], KC_LEN, KC_MULT)
+    bb_width = bb_u - bb_l
+    kc_width = kc_u - kc_l
+    squeeze_on = (bb_u < kc_u) & (bb_l > kc_l)
+    squeeze_off = (bb_u > kc_u) | (bb_l < kc_l)
+    # Trigger = squeeze just turned off and price > ma (bull) or < ma (bear)
+    sig_bull = squeeze_on.shift(1) & squeeze_off & (df["close"] > ma)
+    sig_bear = squeeze_on.shift(1) & squeeze_off & (df["close"] < ma)
+    return squeeze_on, sig_bull, sig_bear, bb_width, kc_width
+
+def macd_signal(close):
+    fast = pd.Series(close).ewm(span=MACD_FAST, adjust=False).mean()
+    slow = pd.Series(close).ewm(span=MACD_SLOW, adjust=False).mean()
+    macd = fast - slow
+    sig = macd.ewm(span=MACD_SIG, adjust=False).mean()
+    hist = macd - sig
+    return macd, sig, hist
+
+def patterns(df):
+    # Lightweight pattern tags (extend later)
+    tags = []
+    # Breakout: last close > N-day high
+    N = 20
+    if df["close"].iloc[-1] >= df["high"].rolling(N).max().iloc[-2]:
+        tags.append("Breakout")
+    # Divergence proxy: price up while volume down (last few bars)
+    if df["close"].iloc[-1] > df["close"].iloc[-4] and df["volume"].iloc[-1] < df["volume"].iloc[-4]:
+        tags.append("Weak-Vol-Push")
+    return tags
+
+def score_signal(rvol_now, hist_now, squeeze_bull, squeeze_bear):
+    score = 0
+    if rvol_now >= RVOL_MIN: score += 2
+    if hist_now > 0: score += 1
+    if hist_now < 0: score -= 1
+    if squeeze_bull: score += 2
+    if squeeze_bear: score -= 2
+    # Cap range
+    score = max(-5, min(5, score))
+    return score
+
+# ─────────────────────────────────────────────────────────────
+# Option helper (suggested strikes/expiry if Schwab chain not used yet)
+# ─────────────────────────────────────────────────────────────
+def next_friday(from_dt=None):
+    if from_dt is None: from_dt = dt.datetime.now(timezone.utc)
+    # Friday = 4 (Mon=0)
+    days_ahead = (4 - from_dt.weekday()) % 7
+    if days_ahead == 0 and from_dt.hour >= 20: # past 8pm UTC → pick next week
+        days_ahead = 7
+    d = (from_dt + timedelta(days=days_ahead)).date()
+    return d.isoformat()
+
+def suggested_option(symbol, last_price, direction):
+    # Direction: "CALL" or "PUT"
+    # Heuristic strike selection near 0.30–0.40 delta ≈ ~5% OTM for fast movers
+    otm_pct = 0.05
+    if direction == "CALL":
+        strike = round((1+otm_pct) * last_price, 2)
+        side = "C"
+    else:
+        strike = round((1-otm_pct) * last_price, 2)
+        side = "P"
+    expiry = next_friday()
+    return {"symbol": symbol, "side": side, "strike": strike, "expiry": expiry}
+
+# ─────────────────────────────────────────────────────────────
+# Discord
+# ─────────────────────────────────────────────────────────────
+def post_discord(embed):
+    if not DISCORD_WEBHOOK_URL:
+        return
+    payload = {"embeds": [embed]}
+    try:
+        r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        print("Discord error:", e)
+
+def make_embed(signal):
+    color = 0x15C39A if signal["bias"] == "BULL" else 0xE03A3A
+    fields = [
+        {"name":"Price", "value": f"${signal['last_price']:.2f}", "inline": True},
+        {"name":"RVOL", "value": f"{signal['rvol']:.2f}x", "inline": True},
+        {"name":"Score", "value": f"{signal['score']}/5", "inline": True},
+        {"name":"Pattern", "value": ", ".join(signal['patterns']) or "—", "inline": True},
+        {"name":"Stop", "value": f"${signal['stop']:.2f}", "inline": True},
+        {"name":"Target", "value": f"${signal['target']:.2f}", "inline": True},
+    ]
+    if signal.get("option"):
+        o = signal["option"]
+        fields.append({"name":"Option", "value": f"{signal['ticker']} {o['expiry']} {o['side']}{o['strike']}", "inline": False})
+
+    return {
+        "title": f"🚀 {signal['ticker']} — {signal['bias']} Signal",
+        "description": "BeastMode Squeeze Scanner",
+        "color": color,
+        "footer": {"text": "Not financial advice — educational signals"},
+        "timestamp": dt.datetime.now(timezone.utc).isoformat()
+    } | {"fields": fields}
+
+# ─────────────────────────────────────────────────────────────
+# Core scan
+# ─────────────────────────────────────────────────────────────
+def scan_one(symbol):
+    try:
+        df = alpha_intraday(symbol, interval="5min", output="compact")
+        if len(df) < 60: return None
+        rvol = calc_rvol(df["volume"], RVOL_LOOKBACK)
+        squeeze_on, s_bull, s_bear, bb_w, kc_w = is_ttm_squeeze(df)
+        macd, sig, hist = macd_signal(df["close"])
+
+        last_price = df["close"].iloc[-1]
+        rvol_now = float(rvol.iloc[-1]) if not np.isnan(rvol.iloc[-1]) else 0.0
+        bull_trig = bool(s_bull.iloc[-1])
+        bear_trig = bool(s_bear.iloc[-1])
+        hist_now = float(hist.iloc[-1])
+
+        if rvol_now < RVOL_MIN and not bull_trig and not bear_trig:
+            return None # ignore weak noise
+
+        bias = "BULL" if (hist_now > 0 or bull_trig) else "BEAR"
+        sc = score_signal(rvol_now, hist_now, bull_trig, bear_trig)
+        pats = patterns(df)
+
+        # Risk box (ATR-ish using KC width)
+        atr_proxy = float((kc_w.iloc[-1]) / 2.0) if not np.isnan(kc_w.iloc[-1]) else max(0.02*last_price, 0.1)
+        stop = last_price - atr_proxy if bias=="BULL" else last_price + atr_proxy
+        target = last_price + 2*atr_proxy if bias=="BULL" else last_price - 2*atr_proxy
+
+        # Suggested option (heuristic now; swap to Schwab chain when ready)
+        opt = suggested_option(symbol, last_price, "CALL" if bias=="BULL" else "PUT")
+
+        signal = {
+            "ticker": symbol,
+            "last_price": last_price,
+            "rvol": rvol_now,
+            "score": sc,
+            "bias": bias,
+            "patterns": pats,
+            "stop": stop,
+            "target": target,
+            "option": opt
+        }
+        return signal
+    except Exception as e:
+        print(f"[{symbol}] scan error:", e)
         return None
 
-    close = df["close"].values
-    vol = df["volume"].values
-
-    sma20 = pd.Series(close).rolling(20).mean().iloc[-1]
-    sma5 = pd.Series(close).rolling(5).mean().iloc[-1]
-    last_close = close[-1]
-    last_vol = vol[-1]
-    avg_vol20 = pd.Series(vol).rolling(20).mean().iloc[-1]
-    rvol = (last_vol / avg_vol20) if avg_vol20 and not math.isnan(avg_vol20) else np.nan
-
-    _, _, _, bb_width_now = bb_stats(close, length=20, mult=2.0)
-    # Percentile of current BB width vs last 60 days
-    widths = []
-    s = pd.Series(close)
-    for i in range(20, min(len(s), 100)):
-        window = s.iloc[:i]
-        ma = window.rolling(20).mean()
-        sd = window.rolling(20).std(ddof=0)
-        if pd.notna(ma.iloc[-1]) and pd.notna(sd.iloc[-1]):
-            w = (ma.iloc[-1] + 2*sd.iloc[-1] - (ma.iloc[-1] - 2*sd.iloc[-1])) / ma.iloc[-1]
-            widths.append(w)
-    pr_width = percent_rank(widths[-60:], bb_width_now) if len(widths) >= 5 else np.nan
-
-    trend_ok = last_close > sma20 and sma5 > sma20
-    squeeze_forming = (not math.isnan(pr_width)) and pr_width <= 0.20 # bottom 20% width
-    momentum_ok = pct(last_close, df["close"].iloc[-2]) >= 1.5 # ≥ +1.5% vs yesterday
-    rvol_ok = (not math.isnan(rvol)) and rvol >= 1.5
-
-    score = sum([bool(squeeze_forming), bool(rvol_ok), bool(trend_ok and momentum_ok)])
-    return {
-        "symbol": sym,
-        "last_close": round(last_close, 4),
-        "rvol": round(float(rvol), 2) if not math.isnan(rvol) else None,
-        "pr_width": round(float(pr_width), 2) if not math.isnan(pr_width) else None,
-        "squeeze": bool(squeeze_forming),
-        "trend_ok": bool(trend_ok),
-        "momentum_ok": bool(momentum_ok),
-        "score": int(score),
-    }
-
-def embed_from_signal(sig):
-    color = 0x2ecc71 if sig["score"] >= 2 else 0xf1c40f if sig["score"] == 1 else 0xe74c3c
-    lines = []
-    lines.append(f"**Price:** ${sig['last_close']}")
-    if sig["rvol"] is not None:
-        lines.append(f"**RVOL (20d):** {sig['rvol']}x")
-    if sig["pr_width"] is not None:
-        lines.append(f"**BB Width %Rank (60d):** {int(sig['pr_width']*100)}th pct")
-    checks = []
-    checks.append("✅ Squeeze forming" if sig["squeeze"] else "▫️ Squeeze")
-    checks.append("✅ Trend+Mom" if sig["trend_ok"] and sig["momentum_ok"] else "▫️ Trend+Mom")
-    checks.append("✅ RVOL" if sig["rvol"] and sig["rvol"] >= 1.5 else "▫️ RVOL")
-    lines.append(" / ".join(checks))
-
-    return {
-        "title": f"🚀 {sig['symbol']} — Momentum Building ({sig['score']}/3)",
-        "description": "\n".join(lines),
-        "timestamp": datetime.utcnow().isoformat(),
-        "color": color,
-        "footer": {"text": "Beastmode Alpha Scanner"},
-    }
-
-# ─────────────────────────────────────────────────────────────
-# Scanner Loop
-# ─────────────────────────────────────────────────────────────
-def scanner_loop():
-    post_discord(content="🟢 **Beastmode Alpha Bot is ONLINE** — tracking tickers now…")
-    q = deque(TICKERS)
-    last_heartbeat = time.time()
-
+def scan_loop():
+    print("BeastMode loop started.")
+    # Initial heartbeat to Discord
+    post_discord({
+        "title": "🟢 BeastMode Alpha Bot is ONLINE",
+        "description": f"Tracking {len(UNIVERSE)} tickers now…",
+        "color": 0x2ECC71
+    })
+    i = 0
     while True:
-        # Heartbeat
-        if time.time() - last_heartbeat >= HEARTBEAT_MIN * 60:
-            post_discord(content=f"⏱️ Heartbeat {ts()} — monitoring {len(TICKERS)} tickers.")
-            last_heartbeat = time.time()
+        start = time.time()
+        # Respect Alpha Vantage rate limits: ~5 req/min free. We stagger symbols.
+        # Batch 5 per minute.
+        batch = UNIVERSE[(i*5)%len(UNIVERSE): ((i*5)%len(UNIVERSE))+5]
+        if not batch:
+            batch = UNIVERSE[:5]
+        for sym in batch:
+            sig = scan_one(sym)
+            if sig:
+                embed = make_embed(sig)
+                post_discord(embed)
+            time.sleep(1.0) # short spacing between calls
 
-        if not q:
-            q = deque(TICKERS)
-
-        sym = q.popleft()
-        try:
-            sig = analyze_symbol(sym)
-            if sig and sig["score"] >= 2:
-                post_discord(embed=embed_from_signal(sig))
-            else:
-                # Quiet pass; uncomment to see every scan:
-                # post_discord(content=f"ℹ️ {sym} scanned — no strong setup.")
-                pass
-        except Exception as e:
-            print(f"[{ts()}] Scan error {sym}: {e}")
-
-        time.sleep(SCAN_INTERVAL_SEC)
+        i += 1
+        # sleep to complete ~60s cadence
+        elapsed = time.time() - start
+        time.sleep(max(5, SCAN_INTERVAL_SEC - elapsed))
 
 # ─────────────────────────────────────────────────────────────
-# Minimal HTTP server (keeps free Render web dyno alive)
+# Main
 # ─────────────────────────────────────────────────────────────
-def start_http_server():
-    port = int(os.getenv("PORT", "10000"))
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, fmt, *args): # quieter logs
-            return
-    with socketserver.TCPServer(("", port), Handler) as httpd:
-        print(f"[{ts()}] http server running on {port}")
-        httpd.serve_forever()
-
 if __name__ == "__main__":
-    # Thread 1: tiny HTTP server
-    t1 = threading.Thread(target=start_http_server, daemon=True)
-    t1.start()
-
-    # Thread 2: scanner
-    scanner_loop()
+    # Run web heartbeat + scanner loop in parallel
+    threading.Thread(target=run_server, daemon=True).start()
+    scan_loop()
