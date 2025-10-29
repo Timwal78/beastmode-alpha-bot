@@ -6,7 +6,8 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: python bot.py --port 10000
+    startCommand: |
+      python -m http.server 10000 & python bot.py
     envVars:
       - key: ALPHA_KEY
         value: your_alpha_vantage_api_key_here
