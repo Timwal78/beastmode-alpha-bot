@@ -7,7 +7,11 @@ services:
       pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: |
-      python -m http.server 10000 & python bot.py
+      python -m http.server 10000 & python bot.py &
+      while true; do
+        curl -s "https://beastmode-alpha-bot.onrender.com" > /dev/null
+        sleep 600
+      done
     envVars:
       - key: ALPHA_KEY
         value: your_alpha_vantage_api_key_here
