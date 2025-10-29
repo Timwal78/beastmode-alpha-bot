@@ -4,12 +4,13 @@ services:
     env: python
     plan: free
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: ALPHA_KEY
         value: your_alpha_vantage_api_key_here
       - key: DISCORD_WEBHOOK
-        value: https://discord.com/api/webhooks/XXXXXXXXXXXX
+        value: https://discord.com/api/webhooks/1425603461826875435/aQBVUMfvza2qjuMaOJhSS3zTuC7mwJsreTlr_TfkUlQLzHt2gmc_noGlGadRUvrqJjGm
       - key: TICKERS
-        value: AMC,GME,IONQ,SMR,NAK,BNZI,FFIE
+        value: AMC,GME,IONQ,NAK,SMR,FFIE,BNZI
