@@ -10,3 +10,6 @@ schedule==1.2.0
 python-dotenv==1.0.0
 flask==2.3.2
 gunicorn
+pip>=24.0
+setuptools>=70.0
+wheel>=0.43.0
