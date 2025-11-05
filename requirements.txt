@@ -1,7 +1,6 @@
-# BeastMode Trading Bot requirements (Render safe)
 --extra-index-url https://pypi.org/simple
-pandas==2.1.4 --only-binary :all:
-numpy==1.26.0
+pandas==2.0.3
+numpy==1.24.3
 requests==2.31.0
 ta==0.11.0
 yfinance==0.2.28
