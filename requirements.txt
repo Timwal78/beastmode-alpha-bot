@@ -1,5 +1,5 @@
 # ✅ BeastMode Trading Bot requirements (Render safe)
-pandas==2.2.2
+pandas==2.2.2 --only-binary :all:
 numpy==1.26.4
 requests==2.31.0
 ta==0.11.0
