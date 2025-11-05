@@ -1,14 +1,11 @@
 --extra-index-url https://pypi.org/simple
-pandas==2.0.3
-numpy==1.24.3
-requests==2.31.0
-ta==0.11.0
-yfinance==0.2.28
-alpaca-py==0.21.0
-schedule==1.2.0
-python-dotenv==1.0.0
-flask==2.3.2
+pandas
+numpy
+requests
+ta
+yfinance
+alpaca-py
+schedule
+python-dotenv
+flask
 gunicorn
-pip>=24.0
-setuptools>=70.0
-wheel>=0.43.0
